@@ -3,6 +3,7 @@
 """
 Kafka 数据查询脚本
 支持多种过滤条件，返回 JSON 格式结果。
+python scripts/query_kafka.py --topic orders  --max-messages 2
 """
 
 import argparse
@@ -64,6 +65,11 @@ def query_kafka(args):
     from_ts = parse_time(args.from_time) if args.from_time else None
     to_ts = parse_time(args.to_time) if args.to_time else None
 
+    # 设置轮询超时（毫秒）
+    poll_timeout_ms = 1000  # 每次 poll 最多等待1秒
+    max_idle_seconds = 10   # 连续无消息的最长等待时间，超过即退出
+    idle_start = None       # 记录空闲开始时间
+
     all_messages = []
     max_msgs = args.max_messages
 
@@ -106,43 +112,64 @@ def query_kafka(args):
         # 设置消费位置
         consumer.seek(tp, start_offset)
 
-        # 添加超时参数
-        timeout_seconds = 30  # 最大等待30秒
-        start_time = time.time()
+        # 重置空闲计时器
+        idle_start = None
 
         # 消费消息
-        print("loop1...")
-        for msg in consumer: # 这个位置会卡住
-            print("loop2...")
-            # 检查是否超时
-            if time.time() - start_time > timeout_seconds:
-                print(json.dumps({"warning": f"Query timed out[{timeout_seconds}], partial results returned"}))
-                break
+        print("loop...")
+        while True:
+            # 检查是否达到最大消息数
             if len(all_messages) >= max_msgs:
                 break
-            if msg.offset >= end_offset:
+            
+            # 使用 poll 获取一批消息
+            msg_pack = consumer.poll(timeout_ms=1000, max_records=100)
+
+            if not msg_pack:
+                # 没有消息返回，可能是空闲
+                if idle_start is None:
+                    idle_start = time.time()
+                elif time.time() - idle_start > max_idle_seconds:
+                    # 连续空闲超时，退出循环（避免卡死）
+                    print(f"Warning: No messages for {max_idle_seconds} seconds, stopping partition {part}", file=sys.stderr)
+                    break
+                continue
+            else:
+                # 有消息，重置空闲计时器
+                idle_start = None
+
+            # 处理返回的消息
+            for tp, messages in msg_pack.items():
+                for msg in messages:
+                    if msg.offset >= end_offset:
+                        break
+
+                    # 按 key 过滤
+                    if args.key is not None:
+                        key_str = msg.key.decode('utf-8') if msg.key else ''
+                        if args.key != key_str:
+                            continue
+
+                    # 解码 value
+                    try:
+                        value = json.loads(msg.value.decode('utf-8'))
+                    except:
+                        value = msg.value.decode('utf-8', errors='ignore')
+
+                    all_messages.append({
+                        "offset": msg.offset,
+                        "key": msg.key.decode('utf-8') if msg.key else None,
+                        "value": value,
+                        "timestamp": msg.timestamp,
+                        "partition": msg.partition
+                    })
+
+                    if len(all_messages) >= max_msgs:
+                        break
+                if len(all_messages) >= max_msgs:
+                    break
+            if len(all_messages) >= max_msgs:
                 break
-
-            # 按 key 过滤
-            if args.key is not None:
-                # key 可能是 bytes，解码为字符串比较
-                key_str = msg.key.decode('utf-8') if msg.key else ''
-                if args.key not in key_str:  # 支持子串匹配
-                    continue
-
-            # 解码 value（假设为 JSON 或字符串）
-            try:
-                value = json.loads(msg.value.decode('utf-8'))
-            except:
-                value = msg.value.decode('utf-8', errors='ignore')
-
-            all_messages.append({
-                "offset": msg.offset,
-                "key": msg.key.decode('utf-8') if msg.key else None,
-                "value": value,
-                "timestamp": msg.timestamp,
-                "partition": msg.partition
-            })
 
     consumer.close()
 
