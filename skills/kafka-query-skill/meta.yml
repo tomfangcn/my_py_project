@@ -1,0 +1,8 @@
+name: kafka_data_query
+description: 多样化查询 Kafka 主题中的数据，支持按时间范围、偏移量、分区、key 检索，并可限制返回条数。
+version: 1.0.0
+author: your-team
+tags:
+  - kafka
+  - data-query
+  - messaging
